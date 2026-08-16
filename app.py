@@ -1,9 +1,8 @@
 """AnmolFi — Institutional Financial Intelligence & AML Surveillance Platform.
 
 An autonomous transaction-monitoring console: orchestrates unsupervised machine-learning
-ensembles (Isolation Forest, Local Outlier Factor, Mahalanobis Distance), deterministic
-AML typologies, and directed graph topological analysis into explainable risk scores,
-interactive graph forensics, in-memory SQL analytics, and automated FinCEN SAR compliance dossiers.
+ensembles, deterministic AML typologies, and directed graph topological analysis into 
+explainable risk scores, interactive graph forensics, in-memory SQL analytics, and SAR dossiers.
 """
 from __future__ import annotations
 
@@ -54,7 +53,6 @@ except ImportError:
             pass
         res = PipelineResult()
         
-        # Safe fallback if empty txns are passed
         if txns.empty:
             raise ValueError("Transaction ledger is empty.")
             
@@ -116,6 +114,31 @@ except ImportError:
 
 
 # --------------------------------------------------------------------------- #
+# Utility: Safe Exporter for SQLite, Excel, and JSON                          #
+# --------------------------------------------------------------------------- #
+def sanitize_for_export(df: pd.DataFrame) -> pd.DataFrame:
+    """Removes complex Python types (lists/dicts/datetimes) to prevent SQL & Excel crashes."""
+    df_safe = df.copy()
+    for col in df_safe.columns:
+        # Convert Lists/Sets to comma-separated strings
+        if df_safe[col].apply(lambda x: isinstance(x, (list, tuple, set, dict))).any():
+            df_safe[col] = df_safe[col].apply(lambda x: ", ".join(map(str, x)) if isinstance(x, (list, tuple, set)) else str(x))
+        # Convert Datetime to string to avoid timezone parsing errors
+        if pd.api.types.is_datetime64_any_dtype(df_safe[col]):
+            df_safe[col] = df_safe[col].astype(str)
+    return df_safe
+
+class NumpyJSONEncoder(json.JSONEncoder):
+    """Safely serializes numpy floats and Pandas timestamps to prevent JSON crashes."""
+    def default(self, obj):
+        if isinstance(obj, np.integer): return int(obj)
+        if isinstance(obj, np.floating): return float(obj)
+        if isinstance(obj, np.ndarray): return obj.tolist()
+        if isinstance(obj, (datetime, pd.Timestamp)): return str(obj)
+        return super().default(obj)
+
+
+# --------------------------------------------------------------------------- #
 # App & Theme Styling (Google Brand Palette + Google Sans Font)               #
 # --------------------------------------------------------------------------- #
 st.set_page_config(
@@ -130,9 +153,6 @@ GOOGLE_BLUE = "#4285F4"
 GOOGLE_RED = "#EA4335"
 GOOGLE_YELLOW = "#FBBC05"
 GOOGLE_GREEN = "#34A853"
-GOOGLE_DARK = "#202124"
-GOOGLE_GRAY = "#5F6368"
-GOOGLE_LIGHT_BG = "#F8F9FA"
 
 BAND_COLORS = {
     "CRITICAL": GOOGLE_RED,
@@ -141,7 +161,7 @@ BAND_COLORS = {
     "LOW": GOOGLE_GREEN,
 }
 
-# Custom Google Styling Injection
+# Safely Injected CSS (with box-sizing: border-box to fix layout overlap)
 st.markdown(
     f"""
     <style>
@@ -153,23 +173,28 @@ st.markdown(
     code, pre, .stCode {{
         font-family: 'Roboto Mono', monospace !important;
     }}
-    .stMetric {{
-        background: {GOOGLE_LIGHT_BG};
-        padding: 14px 18px;
-        border-radius: 12px;
+    /* Targeting Streamlit Metric Containers safely */
+    [data-testid="stMetric"] {{
+        background-color: #F8F9FA;
+        padding: 12px 16px;
+        border-radius: 8px;
         border-left: 5px solid {GOOGLE_BLUE};
-        box-shadow: 0 1px 3px rgba(60,64,67,0.08);
+        box-shadow: 0 1px 3px rgba(60,64,67,0.1);
+        box-sizing: border-box !important;
+        margin-bottom: 10px;
     }}
     .sar-box {{
         background-color: #FAFAFA;
         border: 1px solid #DADCE0;
         border-left: 6px solid {GOOGLE_RED};
-        padding: 20px;
+        padding: 16px;
         border-radius: 8px;
         font-family: 'Roboto Mono', monospace;
-        font-size: 0.88rem;
-        line-height: 1.5;
+        font-size: 0.85rem;
+        line-height: 1.6;
         white-space: pre-wrap;
+        word-wrap: break-word;
+        box-sizing: border-box !important;
     }}
     </style>
     """,
@@ -191,7 +216,6 @@ def _read_upload(file_bytes, file_name):
     else:
         df = pd.read_csv(io.BytesIO(file_bytes))
         
-    # Validate required columns to prevent crashes
     required_cols = {"timestamp", "src", "dst", "amount"}
     if not required_cols.issubset(df.columns):
         raise ValueError(f"Uploaded file is missing required columns. Need: {required_cols}")
@@ -296,10 +320,10 @@ tabs = st.tabs([
     "🚨 Triage Queue & Actions",
     "🔍 Case Investigation & SAR",
     "🕸️ Money-Flow Network",
-    "🧠 ML & Feature Attribution",
+    "🧠 ML Insights",
     "💬 SQL Query Console",
     "📄 Audit Exports",
-    "✅ Evaluation & ROC",
+    "✅ Model Evaluation",
 ])
 
 # --------------------------------------------------------------------------- #
@@ -382,7 +406,7 @@ with tabs[1]:
     show_df = triage_view[["risk_score", "risk_band", "disposition", "throughput", "net_flow", "top_reason"]].copy()
     show_df["risk_score"] = show_df["risk_score"].round(1)
     
-    st.dataframe(show_df.rename_axis("Account ID").reset_index(), use_container_width=True, height=400)
+    st.dataframe(show_df.rename_axis("Account ID").reset_index(), use_container_width=True)
 
     st.markdown("#### ⚡ Batch / Case Disposition Action")
     c_act1, c_act2, c_act3 = st.columns([1.5, 1.5, 2])
@@ -471,12 +495,14 @@ RECOMMENDATION: Immediate account restriction and FinCEN filing."""
         with d_col1:
             st.download_button("⬇️ Download SAR (.txt)", sar_draft.encode("utf-8"), file_name=f"SAR_{investigate_acct}.txt")
         with d_col2:
-            # Safe JSON Casting
-            sar_json = json.dumps({
+            # Safely encode numpy/pandas types to JSON
+            sar_dict = {
                 "institution": "AnmolFi", "entity": investigate_acct,
-                "risk_score": float(acc_row["risk_score"]), "risk_band": acc_row["risk_band"],
-                "reasons": reasons, "throughput": float(acc_row["throughput"])
-            }, indent=2, default=str)
+                "risk_score": acc_row["risk_score"], "risk_band": acc_row["risk_band"],
+                "reasons": reasons, "throughput": acc_row["throughput"],
+                "transactions": acct_tx.to_dict(orient="records")
+            }
+            sar_json = json.dumps(sar_dict, indent=2, cls=NumpyJSONEncoder)
             st.download_button("⬇️ Download SAR Package (.json)", sar_json.encode("utf-8"), file_name=f"SAR_{investigate_acct}.json")
 
 # --------------------------------------------------------------------------- #
@@ -553,13 +579,15 @@ with tabs[5]:
     st.subheader("💬 In-Memory SQL Query Console")
     sql_conn = sqlite3.connect(":memory:")
     
-    # Safely convert pandas timestamps to strings to prevent SQLite crash
-    txns_sql = txns.copy()
-    txns_sql['timestamp'] = txns_sql['timestamp'].astype(str) 
+    # 1. Sanitize DataFrames to prevent SQL crashes (Lists -> Strings)
+    txns_sql = sanitize_for_export(txns)
+    results_sql = sanitize_for_export(results.reset_index())
+    alerts_sql = sanitize_for_export(alerts.reset_index())
     
+    # 2. Write safely to in-memory SQLite
     txns_sql.to_sql("transactions", sql_conn, index=False, if_exists="replace")
-    results.reset_index().to_sql("accounts", sql_conn, index=False, if_exists="replace")
-    alerts.reset_index().to_sql("alerts", sql_conn, index=False, if_exists="replace")
+    results_sql.to_sql("accounts", sql_conn, index=False, if_exists="replace")
+    alerts_sql.to_sql("alerts", sql_conn, index=False, if_exists="replace")
 
     user_query = st.text_area("SQL Statement Editor", value="SELECT account, risk_score, risk_band FROM accounts WHERE risk_score > 60 LIMIT 15;", height=110)
 
@@ -579,12 +607,15 @@ with tabs[6]:
     if st.button("Generate Master Excel Package"):
         out_buffer = io.BytesIO()
         with pd.ExcelWriter(out_buffer, engine="openpyxl") as writer:
-            results.reset_index().to_excel(writer, sheet_name="Accounts", index=False)
-            alerts.reset_index().to_excel(writer, sheet_name="Alerts", index=False)
             
-            txns_excel = txns.copy()
-            txns_excel['timestamp'] = txns_excel['timestamp'].dt.tz_localize(None) # Remove timezone for Excel
-            txns_excel.head(2000).to_excel(writer, sheet_name="Ledger", index=False)
+            # Sanitize DataFrames to prevent Excel crashes (Lists -> Strings)
+            results_excel = sanitize_for_export(results.reset_index())
+            alerts_excel = sanitize_for_export(alerts.reset_index())
+            txns_excel = sanitize_for_export(txns.head(2000))
+            
+            results_excel.to_excel(writer, sheet_name="Accounts", index=False)
+            alerts_excel.to_excel(writer, sheet_name="Alerts", index=False)
+            txns_excel.to_excel(writer, sheet_name="Ledger", index=False)
             
         st.download_button(
             "⬇️ Download Master Excel (.xlsx)", out_buffer.getvalue(),
